@@ -7,26 +7,37 @@ from pymongo.server_api import ServerApi
 import os
 from dotenv import load_dotenv
 from datetime import date
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi import FastAPI, Request
+from fastapi.responses import StreamingResponse
+import json
+import asyncio
 
 load_dotenv()
 
 app = FastAPI()
 
-# DATABASE CONNECTION SETUP
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# DB SETUP
 MONGO_URI = os.getenv("MONGO_URI")
 DATABASE_NAME = os.getenv("DATABASE_NAME", "Denisons")
 ROOMS_COLLECTION = "Rooms"
 BOOKINGS_COLLECTION = "Bookings"
 
-if not MONGO_URI:
-    raise ValueError("MONGO_URI environment variable is not set")
-
 client = AsyncIOMotorClient(MONGO_URI, server_api=ServerApi('1'))
-
 db = client[DATABASE_NAME]
 rooms_collection = db[ROOMS_COLLECTION]
 bookings_collection = db[BOOKINGS_COLLECTION]
 
+
+# ==================== MODELS ========================
 
 class RoomSize(BaseModel):
     area: float
@@ -61,19 +72,19 @@ class Room(BaseModel):
     refund_policy: Optional[str] = None
     banner_image: Optional[str] = ""
 
+    image_url: Optional[str] = ""   # ⭐ NEW CODE
+
     check_in_date: Optional[str] = None
     check_out_date: Optional[str] = None
 
 
-# UPDATED BOOKING REQUEST MODEL
 class BookingRequest(BaseModel):
     check_in_date: str
     check_out_date: str
-    user_name: str       # 👈 NEW
-    email: str           # 👈 NEW
+    user_name: str
+    email: str
 
 
-# UPDATED BOOKING MODEL
 class Booking(BaseModel):
     booking_id: int
     room_id: int
@@ -84,8 +95,8 @@ class Booking(BaseModel):
     status: str
     check_in_date: Optional[str] = None
     check_out_date: Optional[str] = None
-    user_name: str       
-    email: str           
+    user_name: str
+    email: str
 
 
 class BookingResponse(BaseModel):
@@ -93,15 +104,13 @@ class BookingResponse(BaseModel):
     booking: Booking
 
 
+# ==================== EVENTS ========================
+
 @app.on_event("startup")
 async def startup_db():
-    try:
-        await client.admin.command("ping")
-        await rooms_collection.create_index("id", unique=True)
-        await bookings_collection.create_index("booking_id", unique=True)
-        print("🚀 Connected to database successfully!")
-    except Exception as e:
-        print("❌ Could not connect:", str(e))
+    await rooms_collection.create_index("id", unique=True)
+    await bookings_collection.create_index("booking_id", unique=True)
+    print("Database connected")
 
 
 @app.on_event("shutdown")
@@ -109,8 +118,10 @@ async def shutdown_db():
     client.close()
 
 
-# GET ROOMS
-@app.get("/rooms", response_model=List[Room], operation_id="get_all_rooms",description="Display all available rooms along with their full details such as name, guest capacity, amenities, pricing, availability, refund policy, and check-in/check-out dates so the user can compare rooms and choose a suitable one as per their requirement")
+# ==================== APIS ========================
+
+# GET ALL ROOMS
+@app.get("/rooms", response_model=List[Room])
 async def get_all_rooms():
     rooms = []
     cursor = rooms_collection.find({"availability.available_rooms": {"$gt": 0}})
@@ -122,10 +133,44 @@ async def get_all_rooms():
     return rooms
 
 
+# ⭐ NEW CODE ─ Filter Rooms API
+@app.get("/rooms/filter", response_model=List[Room])
+async def filter_rooms(
+    check_in_date: str,
+    check_out_date: str,
+    adults: int,
+    children: int
+):
+    """
+    Filters rooms based on EXACT matching of DB stored date values
+    and guest capacity.
+    """
+    query = {
+        "availability.available_rooms": {"$gt": 0},
+        "adults": {"$gte": adults},
+        "children": {"$gte": children},
+        "check_in_date": check_in_date,
+        "check_out_date": check_out_date
+    }
+
+    rooms = []
+    cursor = rooms_collection.find(query)
+
+    async for room in cursor:
+        room.pop("_id", None)
+        rooms.append(Room(**room))
+
+    return rooms
+
+
 # BOOK ROOM
-@app.post("/rooms/{room_id}/book", response_model=BookingResponse, operation_id="book_room")
-async def book_room(room_id: int, booking_data: BookingRequest = Body(...)):
-    room = await rooms_collection.find_one({"id": room_id})
+# BOOK ROOM USING NAME
+@app.post("/rooms/{room_name}/book", response_model=BookingResponse)
+async def book_room(room_name: str, booking_data: BookingRequest = Body(...)):
+    # Find room based on name (case-insensitive)
+    room = await rooms_collection.find_one({
+        "name": {"$regex": f"^{room_name}$", "$options": "i"}
+    })
 
     if not room:
         raise HTTPException(status_code=404, detail="Room not found")
@@ -133,35 +178,35 @@ async def book_room(room_id: int, booking_data: BookingRequest = Body(...)):
     current_availability = room["availability"]["available_rooms"]
 
     if current_availability <= 0:
-        raise HTTPException(status_code=400, detail="Room is fully booked")
+        raise HTTPException(status_code=400, detail="Room not available")
 
+    # Reduce room availability
     await rooms_collection.update_one(
-        {"id": room_id},
+        {"id": room["id"]},
         {"$set": {"availability.available_rooms": current_availability - 1}}
     )
 
+    # Booking ID logic
     last_booking = await bookings_collection.find_one(sort=[("booking_id", -1)])
     new_booking_id = (last_booking["booking_id"] + 1) if last_booking else 1
 
     today = date.today().strftime("%Y-%m-%d")
 
-    # STORE NEW USER VALUES
     booking_record = {
         "booking_id": new_booking_id,
-        "room_id": room_id,
-        "room_name": room["name"],
+        "room_id": room["id"],      # keep id internally
+        "room_name": room["name"],  # using name now
         "total_price": room["pricing"]["total_price"],
         "currency": room["pricing"]["currency"],
         "booking_date": today,
         "status": "confirmed",
         "check_in_date": booking_data.check_in_date,
         "check_out_date": booking_data.check_out_date,
-        "user_name": booking_data.user_name,  
-        "email": booking_data.email          
+        "user_name": booking_data.user_name,
+        "email": booking_data.email
     }
 
     await bookings_collection.insert_one(booking_record)
-
     booking_record.pop("_id", None)
 
     return {
@@ -170,33 +215,8 @@ async def book_room(room_id: int, booking_data: BookingRequest = Body(...)):
     }
 
 
-# GET BOOKINGS
-@app.get("/bookings", response_model=List[Booking], operation_id="get_all_bookings")
-async def get_all_bookings():
-    bookings = []
-    cursor = bookings_collection.find()
-
-    async for booking in cursor:
-        booking.pop("_id", None)
-        bookings.append(Booking(**booking))
-
-    return bookings
-
-
-# GET BOOKING BY ID
-@app.get("/bookings/{booking_id}", response_model=Booking, operation_id="get_booking_by_id")
-async def get_booking(booking_id: int):
-    booking = await bookings_collection.find_one({"booking_id": booking_id})
-
-    if not booking:
-        raise HTTPException(status_code=404, detail="Booking not found")
-
-    booking.pop("_id", None)
-    return Booking(**booking)
-
-
 # CANCEL BOOKING
-@app.delete("/bookings/{booking_id}/cancel", operation_id="cancel_booking")
+@app.delete("/bookings/{booking_id}/cancel")
 async def cancel_booking(booking_id: int):
     booking = await bookings_collection.find_one({"booking_id": booking_id})
 
@@ -206,11 +226,10 @@ async def cancel_booking(booking_id: int):
     if booking["status"] == "cancelled":
         raise HTTPException(status_code=400, detail="Already cancelled")
 
-    room_id = booking["room_id"]
-    room = await rooms_collection.find_one({"id": room_id})
+    room = await rooms_collection.find_one({"id": booking["room_id"]})
 
     await rooms_collection.update_one(
-        {"id": room_id},
+        {"id": booking["room_id"]},
         {"$set": {"availability.available_rooms": room["availability"]["available_rooms"] + 1}}
     )
 
@@ -221,20 +240,34 @@ async def cancel_booking(booking_id: int):
 
     return {"message": "Booking cancelled successfully!"}
 
+@app.get("/bookings", response_model=List[Booking])
+async def get_all_bookings():
+    bookings = []
+    cursor = bookings_collection.find()
 
+    async for booking in cursor:
+        booking.pop("_id", None)
+        bookings.append(Booking(**booking))
+
+    return bookings
+
+@app.get("/rooms/image")
+async def get_image_by_name(name: str):
+    room = await rooms_collection.find_one({"name": {"$regex": f"^{name}$", "$options": "i"}})
+
+    if not room:
+        raise HTTPException(status_code=404, detail="Room not found")
+
+    image_url = room.get("image_url", "")
+
+    return {
+        "name": room["name"],
+        "image_url": image_url
+    }
+    
 # MCP CONFIG
-mcp = FastApiMCP(
-    app,
-    include_operations=[
-        "get_all_rooms",
-        "book_room",
-        "get_all_bookings",
-        "get_booking_by_id",
-        "cancel_booking"
-    ]
-)
-
-mcp.mount()
+mcp = FastApiMCP(app)
+mcp.mount_http()
 
 
 def main():
