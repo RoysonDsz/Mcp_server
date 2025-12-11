@@ -164,9 +164,25 @@ async def available_rooms(
     adults: Optional[int] = None,
     children: Optional[int] = None,
 ):
-    # basic sanity check
-    checkin_dt = parse_date(check_in_date)
-    checkout_dt = parse_date(check_out_date)
+    # Convert to datetime + validate format
+    try:
+        checkin_dt = datetime.strptime(check_in_date, "%Y-%m-%d")
+        checkout_dt = datetime.strptime(check_out_date, "%Y-%m-%d")
+    except:
+        raise HTTPException(status_code=400, detail="Date must be in YYYY-MM-DD format")
+
+    today = datetime.utcnow().date()
+    max_date = today + timedelta(days=30)
+
+    # ❌ No past dates
+    if checkin_dt.date() < today or checkout_dt.date() < today:
+        raise HTTPException(status_code=400, detail="Dates cannot be in the past")
+
+    # ❌ Not more than 30 days ahead
+    if checkin_dt.date() > max_date or checkout_dt.date() > max_date:
+        raise HTTPException(status_code=400, detail="Dates cannot be more than 30 days ahead")
+
+    # ❌ check-out must be after check-in
     if checkout_dt <= checkin_dt:
         raise HTTPException(status_code=400, detail="check_out_date must be after check_in_date")
 
@@ -174,7 +190,7 @@ async def available_rooms(
     cursor = room_types_collection.find()
 
     async for room in cursor:
-        # capacity filter (use is not None so 0 is allowed)
+        # Capacity filter
         if adults is not None and room["capacity"]["adults"] < adults:
             continue
         if children is not None and room["capacity"]["children"] < children:
@@ -185,7 +201,7 @@ async def available_rooms(
         for rn in room.get("room_numbers", []):
             room_no = rn["room_no"]
 
-            # check if this room_no is already booked in that range
+            # Check for booking overlap
             overlap = await bookings_collection.find_one(
                 {
                     "room_no": room_no,
@@ -195,11 +211,11 @@ async def available_rooms(
                 }
             )
 
-            # only keep room numbers with NO overlap
+            # Only keep room numbers with NO overlap
             if not overlap:
                 available_room_numbers.append(RoomNumber(room_no=room_no))
 
-        # only include room types that have at least 1 free room number
+        # Only include room types that have at least 1 available room
         if available_room_numbers:
             room.pop("_id", None)
             room["room_numbers"] = [r.model_dump() for r in available_room_numbers]
@@ -208,20 +224,34 @@ async def available_rooms(
     return clean_rooms
 
 
-# ==================== BOOK ROOM ====================
 @app.post("/bookings", response_model=BookingResponse)
 async def make_booking(data: BookingRequest):
+
+    # --- DATE VALIDATION ---
+    try:
+        checkin_dt = datetime.strptime(data.check_in_date, "%Y-%m-%d")
+        checkout_dt = datetime.strptime(data.check_out_date, "%Y-%m-%d")
+    except:
+        raise HTTPException(status_code=400, detail="Date must be in YYYY-MM-DD format")
+
+    today = datetime.utcnow().date()
+    max_date = today + timedelta(days=30)
+
+    if checkin_dt.date() < today or checkout_dt.date() < today:
+        raise HTTPException(status_code=400, detail="Dates cannot be in the past")
+
+    if checkin_dt.date() > max_date or checkout_dt.date() > max_date:
+        raise HTTPException(status_code=400, detail="Dates cannot be more than 30 days ahead")
+
+    if checkout_dt <= checkin_dt:
+        raise HTTPException(status_code=400, detail="check_out_date must be after check_in_date")
+    # --- END DATE VALIDATION ---
 
     room_data = await room_types_collection.find_one({"id": data.room_type_id})
     if not room_data:
         raise HTTPException(status_code=404, detail="Room type not found")
 
-    checkin_dt = parse_date(data.check_in_date)
-    checkout_dt = parse_date(data.check_out_date)
-
     stay_days = (checkout_dt - checkin_dt).days
-    if stay_days <= 0:
-        raise HTTPException(status_code=400, detail="check_out_date must be after check_in_date")
 
     if stay_days < room_data["min_days"] or stay_days > room_data["max_days"]:
         raise HTTPException(
@@ -253,7 +283,6 @@ async def make_booking(data: BookingRequest):
     last = await bookings_collection.find_one(sort=[("booking_id", -1)])
     new_id = 1 if not last else last["booking_id"] + 1
 
-    # ✅ CALCULATE TOTAL PRICE
     night_price = room_data["pricing"]["total_price"]
     total_price = night_price * stay_days
 
@@ -269,7 +298,7 @@ async def make_booking(data: BookingRequest):
         "email": data.email,
         "status": "confirmed",
         "created_at": datetime.utcnow().isoformat(),
-        "total_price": total_price   # ✅ STORE TOTAL PRICE
+        "total_price": total_price
     }
 
     await bookings_collection.insert_one(record)
