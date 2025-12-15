@@ -10,9 +10,7 @@ from dotenv import load_dotenv
 import os
 import jwt
 from passlib.context import CryptContext
-
 from fastapi_mcp import FastApiMCP
-
 
 load_dotenv()
 
@@ -39,12 +37,9 @@ def hash_password(password: str) -> str:
 SECRET_KEY = "MY_SECRET_KEY"
 ALGORITHM = "HS256"
 
-
-
 def create_token(username: str):
     expiration = datetime.utcnow() + timedelta(hours=5)
     return jwt.encode({"sub": username, "exp": expiration}, SECRET_KEY, algorithm=ALGORITHM)
-
 
 # ==================== DATABASE CONFIG ====================
 MONGO_URI = os.getenv("MONGO_URI")
@@ -63,14 +58,12 @@ db = client[DATABASE_NAME]
 
 room_types_collection = db[ROOM_TYPES_COLLECTION]
 bookings_collection = db[BOOKINGS_COLLECTION]
-admins_collection = db[ADMINS_COLLECTION]  # ✅ Now db exists
-
+admins_collection = db[ADMINS_COLLECTION]  
 
 # ==================== MODELS ====================
 class Capacity(BaseModel):
     adults: int
     children: int
-
 
 class Pricing(BaseModel):
     base_price: float
@@ -79,10 +72,8 @@ class Pricing(BaseModel):
     currency: str = "INR"
     pricing_type: str = "per night"
 
-
 class RoomNumber(BaseModel):
     room_no: int
-
 
 class RoomType(BaseModel):
     id: int
@@ -98,7 +89,6 @@ class RoomType(BaseModel):
     banner_image: Optional[str] = ""
     refund_policy: Optional[str] = ""
 
-
 class BookingRequest(BaseModel):
     room_type_id: int
     check_in_date: str
@@ -107,7 +97,6 @@ class BookingRequest(BaseModel):
     email: EmailStr
     adults: int
     children: int
-
 
 class Booking(BaseModel):
     booking_id: int
@@ -125,11 +114,9 @@ class Booking(BaseModel):
     status: str
     created_at: str
 
-
 class BookingResponse(BaseModel):
     message: str
     booking: Booking
-
 
 # ==================== LIFECYCLE ====================
 @app.on_event("startup")
@@ -155,7 +142,6 @@ async def start_db():
 async def stop_db():
     client.close()
     print("Database connection closed")
-
 
 # ==================== UTIL FUNCTIONS ====================
 def parse_date(date_str: str) -> datetime:
@@ -218,11 +204,8 @@ async def is_room_type_available(
 
     return False
 
-
 # ==================== CRUD ROOM TYPES ====================
-
-
-@app.get("/room/{room_type_id}", response_model=RoomType)
+@app.get("/room/{room_type_id}", response_model=RoomType,tags=["Rooms"])
 async def get_room(room_type_id: int):
     data = await room_types_collection.find_one({"id": room_type_id})
     if not data:
@@ -233,6 +216,7 @@ async def get_room(room_type_id: int):
 
 # ==================== SEARCH ROOM TYPES BY DATE ====================
 @app.get("/room-types/available", response_model=List[RoomType])
+
 async def available_rooms(
     check_in_date: str = Query(..., description="Check-in date in YYYY-MM-DD format"),
     check_out_date: str = Query(..., description="Check-out date in YYYY-MM-DD format"),
@@ -298,8 +282,7 @@ async def available_rooms(
             clean_rooms.append(RoomType(**room))
 
     return clean_rooms
-
-
+# ==================== BOOKINGS ====================
 @app.post("/bookings", response_model=BookingResponse)
 async def make_booking(data: BookingRequest):
     # Basic log
@@ -438,7 +421,6 @@ async def get_room_image(room_type_name: str):
         raise HTTPException(status_code=404, detail="Room type not found")
     return {"name": room["name"], "image_url": room.get("image_url", "")}
 
-
 @app.delete("/bookings/{booking_id}")
 async def cancel_booking(booking_id: int):
     booking = await bookings_collection.find_one({"booking_id": booking_id})
@@ -448,11 +430,9 @@ async def cancel_booking(booking_id: int):
     print("BOOKING CANCELLED:", booking_id)
     return {"message": "Booking cancelled successfully"}
 
-
 # ==================== MCP ENABLE ====================
 mcp = FastApiMCP(app)
 mcp.mount_http()
-
 
 # ==================== LOGIN ====================
 @app.post("/login")
@@ -473,11 +453,9 @@ async def add_room(room_data: RoomType):
     await room_types_collection.insert_one(room_data.model_dump())
     return room_data
 
-
 @app.get("/")
 def root():
     return {"message": "Hotel Booking API Running 🏨"}
-
 
 @app.get("/room-types", response_model=List[RoomType])
 async def get_all_room_types():
@@ -488,7 +466,6 @@ async def get_all_room_types():
         rooms.append(RoomType(**doc))
     return rooms
 
-
 @app.post("/room-types", response_model=RoomType)
 async def create_room_type(room_data: RoomType):
     existing = await room_types_collection.find_one({"id": room_data.id})
@@ -497,7 +474,6 @@ async def create_room_type(room_data: RoomType):
     await room_types_collection.insert_one(room_data.model_dump())
     return room_data
 
-
 @app.put("/room-types/{room_type_id}", response_model=RoomType)
 async def update_room_type(room_type_id: int, updated: RoomType):
     existing = await room_types_collection.find_one({"id": room_type_id})
@@ -505,7 +481,6 @@ async def update_room_type(room_type_id: int, updated: RoomType):
         raise HTTPException(status_code=404, detail="Room type not found")
     await room_types_collection.update_one({"id": room_type_id}, {"$set": updated.model_dump()})
     return updated
-
 
 @app.delete("/room-types/{room_type_id}")
 async def delete_room_type(room_type_id: int):
@@ -527,7 +502,6 @@ async def all_bookings():
 def main():
     import uvicorn
     uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)
-
 
 if __name__ == "__main__":
     main()
